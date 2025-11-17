@@ -6,12 +6,15 @@ This module provides MCP tools for interacting with Google Docs API and managing
 import logging
 import asyncio
 import io
-from typing import List, Optional
+import os
+import re
+import tempfile
+from typing import List, Optional, Tuple
 from uuid import uuid4
 
 from mcp import types
 from fastmcp import Context
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # Auth & server utilities
 from auth.service_decorator import require_google_service, require_multiple_services
@@ -20,6 +23,124 @@ from core.server import server
 from core.comments import create_comment_tools
 
 logger = logging.getLogger(__name__)
+
+async def convert_markdown_to_docx(
+    markdown_content: str,
+    output_path: Optional[str] = None,
+    proxy_config: Optional[dict] = None
+) -> Tuple[bytes, str]:
+    """
+    Convert markdown content to docx format, including downloading and embedding images.
+
+    Args:
+        markdown_content: The markdown text to convert
+        output_path: Optional output path for the docx file. If None, uses a temp file.
+        proxy_config: Optional proxy configuration dict with 'http' and 'https' keys
+
+    Returns:
+        Tuple of (docx_bytes, output_path)
+
+    Raises:
+        ImportError: If pypandoc is not installed
+        Exception: If conversion or image download fails
+    """
+    try:
+        import pypandoc
+        import requests
+    except ImportError as e:
+        raise ImportError(
+            "pypandoc and requests are required for markdown to docx conversion. "
+            "Install with: pip install pypandoc requests python-docx"
+        ) from e
+
+    # Use temp directory for downloaded images
+    temp_dir = tempfile.mkdtemp()
+    downloaded_images = {}
+
+    try:
+        # Extract image URLs from markdown
+        image_pattern = r'!\[([^\]]*)\]\(([^\)]+)\)'
+        images = re.findall(image_pattern, markdown_content)
+
+        # Download images
+        for idx, (alt_text, url) in enumerate(images, 1):
+            # Skip if already a local file
+            if not url.startswith(('http://', 'https://')):
+                logger.info(f"[convert_markdown_to_docx] Image {idx} is local path: {url}")
+                continue
+
+            try:
+                logger.info(f"[convert_markdown_to_docx] Downloading image {idx}: {url}")
+
+                # Prepare request with optional proxy
+                request_kwargs = {'timeout': 60}
+                if proxy_config:
+                    request_kwargs['proxies'] = proxy_config
+
+                response = await asyncio.to_thread(
+                    requests.get, url, **request_kwargs
+                )
+
+                if response.status_code == 200:
+                    # Determine file extension from content-type or URL
+                    content_type = response.headers.get('content-type', '')
+                    if 'png' in content_type or url.lower().endswith('.png'):
+                        ext = 'png'
+                    elif 'jpeg' in content_type or 'jpg' in content_type or url.lower().endswith(('.jpg', '.jpeg')):
+                        ext = 'jpg'
+                    elif 'gif' in content_type or url.lower().endswith('.gif'):
+                        ext = 'gif'
+                    else:
+                        ext = 'png'  # default
+
+                    img_filename = os.path.join(temp_dir, f"img_{idx}.{ext}")
+                    with open(img_filename, 'wb') as f:
+                        f.write(response.content)
+                    downloaded_images[url] = img_filename
+                    logger.info(f"[convert_markdown_to_docx] Downloaded {img_filename}")
+                else:
+                    logger.warning(
+                        f"[convert_markdown_to_docx] Failed to download image {idx}: "
+                        f"HTTP {response.status_code}"
+                    )
+            except Exception as e:
+                logger.warning(f"[convert_markdown_to_docx] Error downloading image {idx}: {e}")
+
+        # Replace image URLs with local paths in markdown
+        processed_markdown = markdown_content
+        for url, local_path in downloaded_images.items():
+            processed_markdown = processed_markdown.replace(url, local_path)
+
+        # Set output path
+        if output_path is None:
+            output_path = os.path.join(temp_dir, f"converted_{uuid4().hex}.docx")
+
+        # Convert markdown to docx using pypandoc
+        await asyncio.to_thread(
+            pypandoc.convert_text,
+            processed_markdown,
+            'docx',
+            format='md',
+            outputfile=output_path,
+            extra_args=['--resource-path=' + temp_dir]
+        )
+
+        # Read the docx file into bytes
+        with open(output_path, 'rb') as f:
+            docx_bytes = f.read()
+
+        logger.info(f"[convert_markdown_to_docx] Conversion complete: {len(docx_bytes)} bytes")
+
+        return docx_bytes, output_path
+
+    finally:
+        # Clean up downloaded images (but keep the output file)
+        for img_file in downloaded_images.values():
+            try:
+                if os.path.exists(img_file):
+                    os.remove(img_file)
+            except Exception as e:
+                logger.warning(f"[convert_markdown_to_docx] Failed to clean up {img_file}: {e}")
 
 def process_tabs_recursively(tabs: List, level: int = 0, target_tab_id: Optional[str] = None) -> List[str]:
     """
@@ -455,6 +576,127 @@ async def create_doc(
     msg = f"Created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. Link: {link}"
     logger.info(f"Successfully created Google Doc '{title}' (ID: {doc_id}) for {user_google_email}. Link: {link}")
     return msg
+
+async def _create_doc_from_markdown_impl(
+    drive_service,
+    title: str,
+    markdown_content: str,
+) -> str:
+    """
+    Internal implementation for creating a Google Doc from markdown content.
+
+    This function is called by both the MCP tool and can be used directly in tests.
+
+    Args:
+        drive_service: Google Drive service object
+        title: The title for the new Google Doc
+        markdown_content: The markdown content to convert and upload
+
+    Returns:
+        str: Confirmation message with document ID and link.
+    """
+    logger.info(f"[create_doc_from_markdown] Invoked. Title='{title}'")
+
+    try:
+        # Convert markdown to docx (proxy will be handled by system environment)
+        docx_bytes, temp_docx_path = await convert_markdown_to_docx(
+            markdown_content=markdown_content,
+            output_path=None,  # Use automatic temp file
+            proxy_config=None  # Use system proxy settings
+        )
+
+        logger.info(f"[create_doc_from_markdown] Converted markdown to docx: {len(docx_bytes)} bytes")
+
+        # Upload docx to Google Drive and convert to Google Docs
+        file_metadata = {
+            'name': title,
+            'mimeType': 'application/vnd.google-apps.document'  # Convert to Google Docs format
+        }
+
+        media = io.BytesIO(docx_bytes)
+
+        created_file = await asyncio.to_thread(
+            drive_service.files().create(
+                body=file_metadata,
+                media_body=MediaIoBaseUpload(
+                    media,
+                    mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    resumable=True
+                ),
+                fields='id, name, webViewLink',
+                supportsAllDrives=True
+            ).execute
+        )
+
+        doc_id = created_file.get('id')
+        web_link = created_file.get('webViewLink')
+
+        # Clean up temp docx file
+        try:
+            if temp_docx_path and os.path.exists(temp_docx_path):
+                os.remove(temp_docx_path)
+                # Also try to remove the temp directory if empty
+                temp_dir = os.path.dirname(temp_docx_path)
+                try:
+                    os.rmdir(temp_dir)
+                except OSError:
+                    pass  # Directory not empty or other issue, ignore
+        except Exception as e:
+            logger.warning(f"[create_doc_from_markdown] Failed to clean up temp file: {e}")
+
+        msg = f"Created Google Doc from markdown '{title}' (ID: {doc_id}). Link: {web_link}"
+        logger.info(msg)
+        return msg
+
+    except ImportError as e:
+        error_msg = (
+            f"Failed to create document from markdown: {str(e)}. "
+            "Please ensure pypandoc is installed: pip install pypandoc"
+        )
+        logger.error(f"[create_doc_from_markdown] {error_msg}")
+        return f"Error: {error_msg}"
+    except Exception as e:
+        error_msg = f"Failed to create document from markdown: {str(e)}"
+        logger.error(f"[create_doc_from_markdown] {error_msg}")
+        raise
+
+@server.tool
+@require_multiple_services([
+    {"service_type": "drive", "scopes": "drive_write", "param_name": "drive_service"},
+])
+@handle_http_errors("create_doc_from_markdown")
+async def create_doc_from_markdown(
+    ctx: Context,
+    drive_service: str,
+    title: str,
+    markdown_content: str,
+    user_google_email: Optional[str] = None,
+):
+    """
+    <description>Creates a new Google Docs document from markdown content by converting it to docx format first. Supports markdown features including headings, bold/italic text, images (downloaded from URLs), links, lists, and code blocks. Uses system proxy settings if configured.</description>
+
+    <use_case>Creating formatted documents from markdown files, converting documentation to Google Docs with proper formatting and embedded images, or migrating markdown-based content to Google Workspace.</use_case>
+
+    <limitation>Requires pypandoc to be installed on the system. Images must be publicly accessible URLs or local files. Complex markdown features may not translate perfectly to Google Docs format. Large images may take time to download.</limitation>
+
+    <failure_cases>Fails if pypandoc is not installed, if image URLs are inaccessible or behind authentication, or if Google Drive storage quota is exceeded.</failure_cases>
+
+    Args:
+        title: The title for the new Google Doc
+        markdown_content: The markdown content to convert and upload
+        user_google_email: Optional user email for logging context
+
+    Returns:
+        str: Confirmation message with document ID and link.
+    """
+    if user_google_email:
+        logger.info(f"[create_doc_from_markdown] User: {user_google_email}")
+
+    return await _create_doc_from_markdown_impl(
+        drive_service=drive_service,
+        title=title,
+        markdown_content=markdown_content,
+    )
 
 
 # Create comment management tools for documents

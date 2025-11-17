@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Import scope constants
 from auth.scopes import (
     GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE, GMAIL_COMPOSE_SCOPE, GMAIL_MODIFY_SCOPE, GMAIL_LABELS_SCOPE,
-    DRIVE_READONLY_SCOPE, DRIVE_FILE_SCOPE,
+    DRIVE_READONLY_SCOPE, DRIVE_FILE_SCOPE, DRIVE_SCOPE,
     DOCS_READONLY_SCOPE, DOCS_WRITE_SCOPE,
     CALENDAR_READONLY_SCOPE, CALENDAR_EVENTS_SCOPE,
     SHEETS_READONLY_SCOPE, SHEETS_WRITE_SCOPE,
@@ -49,6 +49,7 @@ SCOPE_GROUPS = {
     # Drive scopes
     "drive_read": DRIVE_READONLY_SCOPE,
     "drive_file": DRIVE_FILE_SCOPE,
+    "drive_write": DRIVE_SCOPE,  # Full Drive access for uploading files
 
     # Docs scopes
     "docs_read": DOCS_READONLY_SCOPE,

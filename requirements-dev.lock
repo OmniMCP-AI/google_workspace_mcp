@@ -92,6 +92,8 @@ jsonschema==4.24.0
     # via mcp
 jsonschema-specifications==2025.4.1
     # via jsonschema
+lxml==6.0.2
+    # via python-docx
 markdown-it-py==3.0.0
     # via rich
 mcp==1.11.0
@@ -129,10 +131,14 @@ pygments==2.19.2
     # via rich
 pyjwt==2.10.1
     # via workspace-mcp
+pypandoc==1.15
+    # via workspace-mcp
 pyparsing==3.2.3
     # via httplib2
 pyperclip==1.9.0
     # via fastmcp
+python-docx==1.2.0
+    # via workspace-mcp
 python-dotenv==1.1.1
     # via fastmcp
     # via pydantic-settings
@@ -144,6 +150,7 @@ referencing==0.36.2
 requests==2.32.4
     # via google-api-core
     # via requests-oauthlib
+    # via workspace-mcp
 requests-oauthlib==2.0.0
     # via google-auth-oauthlib
 rich==14.0.0
@@ -172,6 +179,7 @@ typing-extensions==4.14.1
     # via fastapi
     # via pydantic
     # via pydantic-core
+    # via python-docx
     # via referencing
     # via starlette
     # via typing-inspection
