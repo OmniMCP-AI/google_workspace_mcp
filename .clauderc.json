@@ -1,0 +1,18 @@
+{
+  "rules": {
+    "language": "python",
+    "style": "pep8",
+    "env": ".env",
+    "venv": ".venv",
+    "packageManager": "rye"
+  },
+  "knowledge": [
+    "We use `.venv` for virtual environments.",
+    "Package management is handled by Rye, eg: rye add package, not pip/poetry. ",
+    "Environment variables are always stored in `.env`.",
+    "All code must follow PEP8 style.",
+    "put the test case in  ./tests/ folder",
+    "after debug is finished, clean up the debug purpose py file"
+  ]
+}
+
