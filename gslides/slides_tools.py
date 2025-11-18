@@ -29,6 +29,7 @@ from gslides.slides_models import (
     AddTitleResponse,
     AddBodyTextResponse,
     AddBodyImageResponse,
+    AddPageWithContentResponse,
     ErrorResponse
 )
 
@@ -633,6 +634,162 @@ async def add_body_image(
 
     except ValueError as e:
         logger.error(f"Validation error in add_body_image: {e}")
+        return ErrorResponse(success=False, error=str(e))
+
+
+@server.tool
+@require_google_service("slides", "slides")
+@handle_http_errors("add_page_with_content")
+async def add_page_with_content(
+    service,
+    ctx: Context,
+    presentation_url: str,
+    layout: str = "BLANK",
+    title: Optional[str] = None,
+    title_x: int = 30,
+    title_y: int = 20,
+    title_width: int = 640,
+    title_height: int = 60,
+    body_text: Optional[str] = None,
+    body_x: int = 30,
+    body_y: int = 100,
+    body_width: int = 640,
+    body_height: int = 300,
+    image_url: Optional[str] = None,
+    image_x: int = 400,
+    image_y: int = 120,
+    image_width: int = 250,
+    image_height: int = 200,
+    user_google_email: Optional[str] = None
+) -> AddPageWithContentResponse:
+    """
+    <description>Creates a new slide with optional title, body text, and image in one atomic operation. This convenience wrapper combines add_slide, add_title, add_body_text, and add_body_image with customizable positioning.</description>
+
+    <use_case>Rapidly creating complete slides with multiple elements, building presentation pages from templates, automating slide generation with consistent layouts. Perfect for batch slide creation or when you need title + content + image together.</use_case>
+
+    <limitation>All elements are added with flat positioning parameters - no automatic layout management. If any element fails to add, previous elements remain (partial success). For fine-grained control over individual elements, use separate add_title, add_body_text, add_body_image tools.</limitation>
+
+    <failure_cases>Fails with invalid presentation URLs, inaccessible image URLs, or when user lacks edit permissions. Partial failures possible if slide creates but elements fail to add.</failure_cases>
+
+    Args:
+        presentation_url (str): The URL or ID of the presentation
+        layout (str): Slide layout (BLANK, TITLE_AND_BODY, etc.). Defaults to "BLANK"
+        title (Optional[str]): Title text to add. If None, no title is added
+        title_x (int): Title X position in points. Defaults to 30 (top-left)
+        title_y (int): Title Y position in points. Defaults to 20 (top-left)
+        title_width (int): Title width in points. Defaults to 640
+        title_height (int): Title height in points. Defaults to 60
+        body_text (Optional[str]): Body text to add. If None, no body is added
+        body_x (int): Body X position in points. Defaults to 30 (aligned with title)
+        body_y (int): Body Y position in points. Defaults to 100 (below title)
+        body_width (int): Body width in points. Defaults to 640
+        body_height (int): Body height in points. Defaults to 300
+        image_url (Optional[str]): Image URL to add. If None, no image is added
+        image_x (int): Image X position in points. Defaults to 400 (right side)
+        image_y (int): Image Y position in points. Defaults to 120 (aligned with body)
+        image_width (int): Image width in points. Defaults to 250
+        image_height (int): Image height in points. Defaults to 200
+        user_google_email (Optional[str]): The user's Google email address
+
+    Returns:
+        AddPageWithContentResponse: JSON with slide_id, presentation_id, layout, and list of elements_added
+    """
+    logger.info(f"[add_page_with_content] Invoked. URL: '{presentation_url}', Layout: '{layout}'")
+    logger.info(f"  Title: {bool(title)}, Body: {bool(body_text)}, Image: {bool(image_url)}")
+
+    try:
+        presentation_id = await extract_presentation_id_from_url(presentation_url)
+
+        # Generate IDs for all elements
+        slide_id = generate_object_id('slide')
+        title_id = generate_object_id('title') if title else None
+        body_id = generate_object_id('body') if body_text else None
+        image_id = generate_object_id('image') if image_url else None
+
+        # Build requests array
+        requests = []
+        elements_added = []
+
+        # Step 1: Create slide
+        requests.append({
+            'createSlide': {
+                'objectId': slide_id,
+                'slideLayoutReference': {
+                    'predefinedLayout': layout
+                }
+            }
+        })
+
+        # Step 2: Add title if provided
+        if title:
+            title_requests = create_text_box_request(
+                object_id=title_id,
+                page_id=slide_id,
+                text=title,
+                size_height=title_height,
+                size_width=title_width,
+                x=title_x,
+                y=title_y
+            )
+            requests.extend(title_requests)
+            elements_added.append({
+                "type": "title",
+                "object_id": title_id
+            })
+
+        # Step 3: Add body text if provided
+        if body_text:
+            body_requests = create_text_box_request(
+                object_id=body_id,
+                page_id=slide_id,
+                text=body_text,
+                size_height=body_height,
+                size_width=body_width,
+                x=body_x,
+                y=body_y
+            )
+            requests.extend(body_requests)
+            elements_added.append({
+                "type": "body_text",
+                "object_id": body_id
+            })
+
+        # Step 4: Add image if provided
+        if image_url:
+            image_request = create_image_request(
+                object_id=image_id,
+                page_id=slide_id,
+                image_url=image_url,
+                size_height=image_height,
+                size_width=image_width,
+                x=image_x,
+                y=image_y
+            )
+            requests.append(image_request)
+            elements_added.append({
+                "type": "image",
+                "object_id": image_id
+            })
+
+        # Execute all requests in a single batch update
+        await asyncio.to_thread(
+            service.presentations().batchUpdate(
+                presentationId=presentation_id,
+                body={'requests': requests}
+            ).execute
+        )
+
+        logger.info(f"Page with content created successfully. Slide: {slide_id}, Elements: {len(elements_added)}")
+        return AddPageWithContentResponse(
+            success=True,
+            slide_id=slide_id,
+            presentation_id=presentation_id,
+            layout=layout,
+            elements_added=elements_added
+        )
+
+    except ValueError as e:
+        logger.error(f"Validation error in add_page_with_content: {e}")
         return ErrorResponse(success=False, error=str(e))
 
 

@@ -48,6 +48,18 @@ class AddBodyImageResponse(BaseModel):
     presentation_id: str = Field(description="The ID of the presentation")
 
 
+class AddPageWithContentResponse(BaseModel):
+    """Response from add_page_with_content"""
+    success: bool = Field(description="Whether the operation succeeded")
+    slide_id: str = Field(description="The ID of the created slide")
+    presentation_id: str = Field(description="The ID of the presentation")
+    layout: str = Field(description="The layout used for the slide")
+    elements_added: list[dict[str, str]] = Field(
+        description="List of elements added with their types and IDs",
+        default_factory=list
+    )
+
+
 class ErrorResponse(BaseModel):
     """Error response for any operation"""
     success: bool = Field(default=False, description="Always False for errors")
