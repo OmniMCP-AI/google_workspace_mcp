@@ -20,6 +20,7 @@ dependencies = [
     "pyjwt>=2.10.1",
     "tomlkit",
     "markdown>=3.10",
+    "markdown-it-py>=4.0.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

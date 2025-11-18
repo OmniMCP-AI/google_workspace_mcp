@@ -60,6 +60,20 @@ class AddPageWithContentResponse(BaseModel):
     )
 
 
+class MarkdownToSlidesResponse(BaseModel):
+    """Response from create_presentation_from_markdown"""
+    success: bool = Field(description="Whether the operation succeeded")
+    presentation_id: str = Field(description="The ID of the created presentation")
+    presentation_url: str = Field(description="The URL to access the presentation")
+    presentation_title: str = Field(description="The title of the presentation")
+    slides_created: int = Field(description="Number of slides created")
+    total_elements: int = Field(description="Total number of elements created")
+    warnings: list[str] = Field(
+        description="List of warnings during conversion",
+        default_factory=list
+    )
+
+
 class ErrorResponse(BaseModel):
     """Error response for any operation"""
     success: bool = Field(default=False, description="Always False for errors")

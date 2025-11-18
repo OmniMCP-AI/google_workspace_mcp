@@ -30,8 +30,10 @@ from gslides.slides_models import (
     AddBodyTextResponse,
     AddBodyImageResponse,
     AddPageWithContentResponse,
+    MarkdownToSlidesResponse,
     ErrorResponse
 )
+from gslides.markdown_parser import parse_markdown_to_slides
 
 logger = logging.getLogger(__name__)
 
@@ -791,6 +793,185 @@ async def add_page_with_content(
     except ValueError as e:
         logger.error(f"Validation error in add_page_with_content: {e}")
         return ErrorResponse(success=False, error=str(e))
+
+
+@server.tool
+@require_google_service("slides", "slides")
+@handle_http_errors("create_presentation_from_markdown")
+async def create_presentation_from_markdown(
+    service,
+    ctx: Context,
+    markdown_content: str,
+    presentation_title: Optional[str] = None,
+    user_google_email: Optional[str] = None
+):
+    """
+    <description>Creates a complete Google Slides presentation from Markdown content. Parses Markdown structure (H1=title, H2=slides, lists, images) and automatically generates slides with proper formatting.</description>
+
+    <use_case>Rapidly converting documentation to presentations, creating slide decks from notes, automating report presentations, building educational content from Markdown. Perfect for content creators who write in Markdown.</use_case>
+
+    <limitation>Requires H1 heading for presentation title (or provide presentation_title parameter). Only first image per slide is used. Tables are not supported. Code blocks converted to plain monospace text. H3+ headings become body text.</limitation>
+
+    <failure_cases>Fails if markdown has no H1 and no presentation_title provided. Fails with invalid image URLs. Fails if user lacks Slides creation permissions. Returns warnings for unsupported elements (multiple images, tables).</failure_cases>
+
+    Args:
+        markdown_content (str): Markdown text content to convert
+        presentation_title (Optional[str]): Override presentation title (instead of using H1)
+        user_google_email (Optional[str]): The user's Google email address
+
+    Markdown Parsing Rules:
+        - # H1 → Presentation title (required, first H1 only)
+        - ## H2 → New slide with title
+        - ### H3 → Bold subheading in body text
+        - Regular text → Body text
+        - - Lists → Bullet points (converted to •)
+        - 1. Lists → Numbered lists
+        - ![alt](url) → Image on right side (first image only per slide)
+        - ```code``` → Monospace code block
+        - **bold** → Bold text formatting preserved
+        - *italic* → Italic text formatting preserved
+
+    Returns:
+        MarkdownToSlidesResponse: JSON with presentation details, slides created, and warnings
+    """
+    logger.info(f"[create_presentation_from_markdown] Invoked. Content length: {len(markdown_content)}")
+
+    try:
+        # Parse markdown
+        parsed_data = parse_markdown_to_slides(markdown_content)
+
+        # Get title
+        title = presentation_title or parsed_data.get("presentation_title")
+        if not title:
+            return ErrorResponse(
+                success=False,
+                error="No presentation title found. Markdown must start with # H1 heading, or provide presentation_title parameter."
+            )
+
+        slides_data = parsed_data.get("slides", [])
+        warnings = parsed_data.get("warnings", [])
+
+        if not slides_data:
+            return ErrorResponse(
+                success=False,
+                error="No slides generated. Markdown must have at least one ## H2 heading to create slides."
+            )
+
+        logger.info(f"Parsed markdown: title='{title}', slides={len(slides_data)}, warnings={len(warnings)}")
+
+        # Create presentation directly using API
+        body = {'title': title}
+        result = await asyncio.to_thread(
+            service.presentations().create(body=body).execute
+        )
+
+        presentation_id = result.get('presentationId')
+        presentation_url = f"https://docs.google.com/presentation/d/{presentation_id}/edit"
+
+        logger.info(f"Created presentation: {presentation_id}")
+
+        # Create slides using add_page_with_content (directly build requests)
+        total_elements = 0
+        for slide_data in slides_data:
+            try:
+                # Extract presentation ID
+                pres_id = await extract_presentation_id_from_url(presentation_url)
+
+                # Generate IDs
+                slide_id = generate_object_id('slide')
+                title_id = generate_object_id('title') if slide_data.title else None
+                body_id = generate_object_id('body') if slide_data.body_text else None
+                image_id = generate_object_id('image') if slide_data.image_url else None
+
+                # Build requests
+                requests = []
+                elements_count = 0
+
+                # Create slide
+                requests.append({
+                    'createSlide': {
+                        'objectId': slide_id,
+                        'slideLayoutReference': {
+                            'predefinedLayout': 'BLANK'
+                        }
+                    }
+                })
+
+                # Add title if exists
+                if slide_data.title:
+                    title_requests = create_text_box_request(
+                        object_id=title_id,
+                        page_id=slide_id,
+                        text=slide_data.title,
+                        size_height=60,
+                        size_width=640,
+                        x=30,
+                        y=20
+                    )
+                    requests.extend(title_requests)
+                    elements_count += 1
+
+                # Add body text if exists
+                if slide_data.body_text and slide_data.body_text.strip():
+                    body_requests = create_text_box_request(
+                        object_id=body_id,
+                        page_id=slide_id,
+                        text=slide_data.body_text.strip(),
+                        size_height=300,
+                        size_width=640,
+                        x=30,
+                        y=100
+                    )
+                    requests.extend(body_requests)
+                    elements_count += 1
+
+                # Add image if exists
+                if slide_data.image_url:
+                    image_request = create_image_request(
+                        object_id=image_id,
+                        page_id=slide_id,
+                        image_url=slide_data.image_url,
+                        size_height=200,
+                        size_width=250,
+                        x=400,
+                        y=120
+                    )
+                    requests.append(image_request)
+                    elements_count += 1
+
+                # Execute batch update
+                await asyncio.to_thread(
+                    service.presentations().batchUpdate(
+                        presentationId=pres_id,
+                        body={'requests': requests}
+                    ).execute
+                )
+
+                total_elements += elements_count
+                logger.info(f"Created slide '{slide_data.title}' with {elements_count} elements")
+
+            except Exception as e:
+                logger.error(f"Error creating slide '{slide_data.title}': {e}")
+                warnings.append(f"Error creating slide '{slide_data.title}': {str(e)}")
+
+        logger.info(f"Presentation created successfully: {len(slides_data)} slides, {total_elements} elements")
+
+        return MarkdownToSlidesResponse(
+            success=True,
+            presentation_id=presentation_id,
+            presentation_url=presentation_url,
+            presentation_title=title,
+            slides_created=len(slides_data),
+            total_elements=total_elements,
+            warnings=warnings
+        )
+
+    except ValueError as e:
+        logger.error(f"Validation error in create_presentation_from_markdown: {e}")
+        return ErrorResponse(success=False, error=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error in create_presentation_from_markdown: {e}")
+        return ErrorResponse(success=False, error=f"Unexpected error: {str(e)}")
 
 
 # Create comment management tools for slides
