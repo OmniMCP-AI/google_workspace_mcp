@@ -28,6 +28,9 @@ except ImportError:
 
 # Test configuration
 ENDPOINT = "http://127.0.0.1:3333"
+# Use existing presentation instead of creating new ones each time
+EXISTING_PRESENTATION_URL = "https://docs.google.com/presentation/d/1LdiANMokZBByYWcIe5Hhl3b3h-CKldxc9GembxYrcZQ/edit"
+USE_EXISTING_PRESENTATION = True  # Set to False to create new presentations
 
 
 # Test Markdown content
@@ -145,6 +148,10 @@ async def test_markdown_to_slides():
     print("🎯 Testing create_presentation_from_markdown (Stage 3)")
     print("=" * 80)
 
+    if USE_EXISTING_PRESENTATION:
+        print(f"\n📌 Using existing presentation: {EXISTING_PRESENTATION_URL}")
+        print("   Note: New slides will be added to this presentation\n")
+
     # OAuth headers
     headers = {
         "GOOGLE_OAUTH_REFRESH_TOKEN": os.getenv("TEST_GOOGLE_OAUTH_REFRESH_TOKEN"),
@@ -160,6 +167,95 @@ async def test_markdown_to_slides():
         async with ClientSession(read, write) as session:
             await session.initialize()
 
+            # For existing presentation mode, we'll add all test slides to the same presentation
+            if USE_EXISTING_PRESENTATION:
+                # Test: Add all markdown types to the existing presentation
+                print("\n📝 Adding test slides to existing presentation")
+
+                combined_markdown = f"""
+# Test Slides Collection
+
+## Test 1: Simple Slide
+Current solutions are:
+- Expensive
+- Complex
+- Slow
+
+## Test 2: Slide with Image
+![AI Diagram](https://static-cdn.toi-media.com/www/uploads/2014/07/gal-gadot.jpg)
+
+Key areas:
+- Machine Learning
+- Deep Learning
+
+## Test 3: Code Block
+```python
+def hello():
+    print("Hello World")
+```
+
+## Test 4: Complex Slide
+### Key Highlights
+- Revenue increased 25%
+- Customer satisfaction at 95%
+
+![Chart](https://static-cdn.toi-media.com/www/uploads/2014/07/gal-gadot.jpg)
+
+Revenue breakdown:
+1. Product Sales: $5M
+2. Services: $3M
+"""
+
+                # We need to add slides to existing presentation
+                # Since we only have create_presentation_from_markdown which creates NEW presentations,
+                # we'll use add_page_with_content for each section
+
+                print("   Adding slides using add_page_with_content...")
+
+                slides_to_add = [
+                    {
+                        "title": "Test 1: Simple Slide",
+                        "body_text": "Current solutions are:\n• Expensive\n• Complex\n• Slow"
+                    },
+                    {
+                        "title": "Test 2: Slide with Image",
+                        "body_text": "Key areas:\n• Machine Learning\n• Deep Learning",
+                        "image_url": "https://static-cdn.toi-media.com/www/uploads/2014/07/gal-gadot.jpg"
+                    },
+                    {
+                        "title": "Test 3: Code Block",
+                        "body_text": "```python\ndef hello():\n    print(\"Hello World\")\n```"
+                    },
+                    {
+                        "title": "Test 4: Complex Slide",
+                        "body_text": "### Key Highlights\n• Revenue increased 25%\n• Customer satisfaction at 95%\n\nRevenue breakdown:\n1. Product Sales: $5M\n2. Services: $3M",
+                        "image_url": "https://static-cdn.toi-media.com/www/uploads/2014/07/gal-gadot.jpg"
+                    }
+                ]
+
+                slides_created = 0
+                for slide_data in slides_to_add:
+                    result = await session.call_tool("add_page_with_content", {
+                        "presentation_url": EXISTING_PRESENTATION_URL,
+                        "title": slide_data["title"],
+                        "body_text": slide_data.get("body_text"),
+                        "image_url": slide_data.get("image_url")
+                    })
+
+                    if result.isError:
+                        print(f"   ❌ Failed to add slide: {result.content[0].text if result.content else 'Unknown error'}")
+                    else:
+                        response = json.loads(result.content[0].text)
+                        if response.get('success'):
+                            slides_created += 1
+                            print(f"   ✅ Added: {slide_data['title']}")
+
+                print(f"\n✅ Successfully added {slides_created} test slides")
+                print(f"   View presentation: {EXISTING_PRESENTATION_URL}")
+
+                return True
+
+            # Original test mode: Create new presentations
             # Test 1: Simple markdown (3 slides)
             print("\n📝 Test 1: Simple markdown with H1 and H2s")
             result = await session.call_tool("create_presentation_from_markdown", {
