@@ -16,6 +16,21 @@ from auth.service_decorator import require_google_service
 from core.server import server
 from core.utils import handle_http_errors
 from core.comments import create_comment_tools
+from gslides.slides_service import (
+    generate_object_id,
+    get_slide_by_position,
+    extract_presentation_id_from_url,
+    create_text_box_request,
+    create_image_request
+)
+from gslides.slides_models import (
+    CreatePresentationResponse,
+    AddSlideResponse,
+    AddTitleResponse,
+    AddBodyTextResponse,
+    AddBodyImageResponse,
+    ErrorResponse
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +43,7 @@ async def create_presentation(
     ctx: Context,
     user_google_email: Optional[str] = None,
     title: str = "Untitled Presentation"
-):
+) -> CreatePresentationResponse:
     """
     <description>Creates a new empty Google Slides presentation with a single blank slide. Generates a presentation ready for content addition but contains no slides content initially.</description>
     
@@ -54,18 +69,19 @@ async def create_presentation(
     result = await asyncio.to_thread(
         service.presentations().create(body=body).execute
     )
-    
+
     presentation_id = result.get('presentationId')
     presentation_url = f"https://docs.google.com/presentation/d/{presentation_id}/edit"
-    
-    confirmation_message = f"""Presentation Created Successfully for {user_google_email}:
-- Title: {title}
-- Presentation ID: {presentation_id}
-- URL: {presentation_url}
-- Slides: {len(result.get('slides', []))} slide(s) created"""
-    
+    slides = result.get('slides', [])
+
     logger.info(f"Presentation created successfully for {user_google_email}")
-    return confirmation_message
+    return CreatePresentationResponse(
+        success=True,
+        presentation_id=presentation_id,
+        presentation_url=presentation_url,
+        title=title,
+        slides_created=len(slides)
+    )
 
 
 @server.tool
@@ -307,6 +323,317 @@ You can view or download the thumbnail using the provided URL."""
     
     logger.info(f"Thumbnail generated successfully for {user_google_email}")
     return confirmation_message
+
+
+@server.tool
+@require_google_service("slides", "slides")
+@handle_http_errors("add_slide")
+async def add_slide(
+    service,
+    ctx: Context,
+    presentation_url: str,
+    layout: str = "BLANK",
+    slide_id: Optional[str] = None,
+    user_google_email: Optional[str] = None
+) -> AddSlideResponse:
+    """
+    <description>Adds a new slide to an existing presentation with the specified layout (BLANK, TITLE_AND_BODY, etc.). Simplifies slide creation with optional custom slide ID.</description>
+
+    <use_case>Adding slides to presentations programmatically, building multi-slide decks, creating presentation templates with predefined layouts.</use_case>
+
+    <limitation>Layout must be a valid Google Slides predefined layout name. Cannot add slides to presentations without edit permissions.</limitation>
+
+    <failure_cases>Fails with invalid presentation URLs, unsupported layout names, or when user lacks edit permissions on the presentation.</failure_cases>
+
+    Args:
+        presentation_url (str): The URL or ID of the presentation
+        layout (str): Slide layout (BLANK, TITLE_AND_BODY, TITLE_ONLY, etc.). Defaults to "BLANK"
+        slide_id (Optional[str]): Custom slide ID. Auto-generated if not provided
+        user_google_email (Optional[str]): The user's Google email address
+
+    Returns:
+        str: JSON with slide_id and presentation_id
+    """
+    logger.info(f"[add_slide] Invoked. URL: '{presentation_url}', Layout: '{layout}'")
+
+    try:
+        presentation_id = await extract_presentation_id_from_url(presentation_url)
+
+        # Generate slide ID if not provided
+        if not slide_id:
+            slide_id = generate_object_id('slide')
+
+        # Create the slide request
+        requests = [
+            {
+                'createSlide': {
+                    'objectId': slide_id,
+                    'slideLayoutReference': {
+                        'predefinedLayout': layout
+                    }
+                }
+            }
+        ]
+
+        # Execute the batch update
+        await asyncio.to_thread(
+            service.presentations().batchUpdate(
+                presentationId=presentation_id,
+                body={'requests': requests}
+            ).execute
+        )
+
+        logger.info(f"Slide added successfully: {slide_id}")
+        return AddSlideResponse(
+            success=True,
+            slide_id=slide_id,
+            presentation_id=presentation_id,
+            layout=layout
+        )
+
+    except ValueError as e:
+        logger.error(f"Validation error in add_slide: {e}")
+        return ErrorResponse(success=False, error=str(e))
+
+
+@server.tool
+@require_google_service("slides", "slides")
+@handle_http_errors("add_title")
+async def add_title(
+    service,
+    ctx: Context,
+    presentation_url: str,
+    text: str,
+    page_id: str = "last",
+    size_height: int = 50,
+    size_width: int = 600,
+    x: int = 50,
+    y: int = 50,
+    user_google_email: Optional[str] = None
+) -> AddTitleResponse:
+    """
+    <description>Adds a title text box to a specific slide with customizable position and size. Defaults to adding to the last slide in the presentation.</description>
+
+    <use_case>Adding titles to slides programmatically, creating consistent slide headers, automating presentation generation with standardized formatting.</use_case>
+
+    <limitation>Requires valid slide ID or "first"/"last" position. Cannot add titles to slides without edit permissions. Text formatting is basic.</limitation>
+
+    <failure_cases>Fails when page_id doesn't exist, when presentation has no slides, or when user lacks edit permissions.</failure_cases>
+
+    Args:
+        presentation_url (str): The URL or ID of the presentation
+        text (str): The title text to add
+        page_id (str): Slide ID, "first", or "last". Defaults to "last"
+        size_height (int): Height in points. Defaults to 50
+        size_width (int): Width in points. Defaults to 600
+        x (int): X position in points. Defaults to 50
+        y (int): Y position in points. Defaults to 50
+        user_google_email (Optional[str]): The user's Google email address
+
+    Returns:
+        str: JSON with title_object_id and slide_id
+    """
+    logger.info(f"[add_title] Invoked. URL: '{presentation_url}', Text: '{text[:50]}...', Page: '{page_id}'")
+
+    try:
+        presentation_id = await extract_presentation_id_from_url(presentation_url)
+
+        # Resolve the slide ID
+        slide_id, total_slides = await get_slide_by_position(service, presentation_id, page_id)
+
+        # Generate title object ID
+        title_id = generate_object_id('title')
+
+        # Create requests for text box
+        requests = create_text_box_request(
+            object_id=title_id,
+            page_id=slide_id,
+            text=text,
+            size_height=size_height,
+            size_width=size_width,
+            x=x,
+            y=y
+        )
+
+        # Execute the batch update
+        await asyncio.to_thread(
+            service.presentations().batchUpdate(
+                presentationId=presentation_id,
+                body={'requests': requests}
+            ).execute
+        )
+
+        logger.info(f"Title added successfully: {title_id}")
+        return AddTitleResponse(
+            success=True,
+            title_object_id=title_id,
+            slide_id=slide_id,
+            presentation_id=presentation_id
+        )
+
+    except ValueError as e:
+        logger.error(f"Validation error in add_title: {e}")
+        return ErrorResponse(success=False, error=str(e))
+
+
+@server.tool
+@require_google_service("slides", "slides")
+@handle_http_errors("add_body_text")
+async def add_body_text(
+    service,
+    ctx: Context,
+    presentation_url: str,
+    text: str,
+    page_id: str = "last",
+    size_height: int = 200,
+    size_width: int = 600,
+    x: int = 50,
+    y: int = 100,
+    user_google_email: Optional[str] = None
+) -> AddBodyTextResponse:
+    """
+    <description>Adds body text to a specific slide with customizable position and size. Defaults to adding below typical title position on the last slide.</description>
+
+    <use_case>Adding content to slides programmatically, creating slide descriptions, automating presentation content generation with consistent formatting.</use_case>
+
+    <limitation>Requires valid slide ID or "first"/"last" position. Cannot add text to slides without edit permissions. Text formatting is basic.</limitation>
+
+    <failure_cases>Fails when page_id doesn't exist, when presentation has no slides, or when user lacks edit permissions.</failure_cases>
+
+    Args:
+        presentation_url (str): The URL or ID of the presentation
+        text (str): The body text to add
+        page_id (str): Slide ID, "first", or "last". Defaults to "last"
+        size_height (int): Height in points. Defaults to 200
+        size_width (int): Width in points. Defaults to 600
+        x (int): X position in points. Defaults to 50
+        y (int): Y position in points. Defaults to 100
+        user_google_email (Optional[str]): The user's Google email address
+
+    Returns:
+        str: JSON with body_object_id and slide_id
+    """
+    logger.info(f"[add_body_text] Invoked. URL: '{presentation_url}', Text: '{text[:50]}...', Page: '{page_id}'")
+
+    try:
+        presentation_id = await extract_presentation_id_from_url(presentation_url)
+
+        # Resolve the slide ID
+        slide_id, total_slides = await get_slide_by_position(service, presentation_id, page_id)
+
+        # Generate body object ID
+        body_id = generate_object_id('body')
+
+        # Create requests for text box
+        requests = create_text_box_request(
+            object_id=body_id,
+            page_id=slide_id,
+            text=text,
+            size_height=size_height,
+            size_width=size_width,
+            x=x,
+            y=y
+        )
+
+        # Execute the batch update
+        await asyncio.to_thread(
+            service.presentations().batchUpdate(
+                presentationId=presentation_id,
+                body={'requests': requests}
+            ).execute
+        )
+
+        logger.info(f"Body text added successfully: {body_id}")
+        return AddBodyTextResponse(
+            success=True,
+            body_object_id=body_id,
+            slide_id=slide_id,
+            presentation_id=presentation_id
+        )
+
+    except ValueError as e:
+        logger.error(f"Validation error in add_body_text: {e}")
+        return ErrorResponse(success=False, error=str(e))
+
+
+@server.tool
+@require_google_service("slides", "slides")
+@handle_http_errors("add_body_image")
+async def add_body_image(
+    service,
+    ctx: Context,
+    presentation_url: str,
+    image_url: str,
+    page_id: str = "last",
+    size_height: int = 150,
+    size_width: int = 200,
+    x: int = 100,
+    y: int = 50,
+    user_google_email: Optional[str] = None
+) -> AddBodyImageResponse:
+    """
+    <description>Adds an image to a specific slide from a URL with customizable position and size. Defaults to adding to the last slide in the presentation.</description>
+
+    <use_case>Adding images to slides programmatically, inserting logos or diagrams, automating visual content creation in presentations.</use_case>
+
+    <limitation>Requires publicly accessible image URL. Cannot add images to slides without edit permissions. Image must be in supported format (PNG, JPG, GIF).</limitation>
+
+    <failure_cases>Fails when page_id doesn't exist, when image URL is invalid or inaccessible, when presentation has no slides, or when user lacks edit permissions.</failure_cases>
+
+    Args:
+        presentation_url (str): The URL or ID of the presentation
+        image_url (str): The URL of the image to add
+        page_id (str): Slide ID, "first", or "last". Defaults to "last"
+        size_height (int): Height in points. Defaults to 150
+        size_width (int): Width in points. Defaults to 200
+        x (int): X position in points. Defaults to 100
+        y (int): Y position in points. Defaults to 50
+        user_google_email (Optional[str]): The user's Google email address
+
+    Returns:
+        str: JSON with image_object_id and slide_id
+    """
+    logger.info(f"[add_body_image] Invoked. URL: '{presentation_url}', Image: '{image_url}', Page: '{page_id}'")
+
+    try:
+        presentation_id = await extract_presentation_id_from_url(presentation_url)
+
+        # Resolve the slide ID
+        slide_id, total_slides = await get_slide_by_position(service, presentation_id, page_id)
+
+        # Generate image object ID
+        image_id = generate_object_id('image')
+
+        # Create request for image
+        request = create_image_request(
+            object_id=image_id,
+            page_id=slide_id,
+            image_url=image_url,
+            size_height=size_height,
+            size_width=size_width,
+            x=x,
+            y=y
+        )
+
+        # Execute the batch update
+        await asyncio.to_thread(
+            service.presentations().batchUpdate(
+                presentationId=presentation_id,
+                body={'requests': [request]}
+            ).execute
+        )
+
+        logger.info(f"Image added successfully: {image_id}")
+        return AddBodyImageResponse(
+            success=True,
+            image_object_id=image_id,
+            slide_id=slide_id,
+            presentation_id=presentation_id
+        )
+
+    except ValueError as e:
+        logger.error(f"Validation error in add_body_image: {e}")
+        return ErrorResponse(success=False, error=str(e))
 
 
 # Create comment management tools for slides
