@@ -21,3 +21,9 @@ venv/
 # ---- Secrets -----------------------------------------------------------
 client_secret.json
 
+.clauderc.json
+.env
+.envrc
+temp
+docs
+*.log
