@@ -105,8 +105,9 @@ jsonschema-specifications==2025.4.1
     # via jsonschema
 markdown==3.10
     # via workspace-mcp
-markdown-it-py==3.0.0
+markdown-it-py==4.0.0
     # via rich
+    # via workspace-mcp
 mcp==1.11.0
     # via fastmcp
 mdurl==0.1.2
