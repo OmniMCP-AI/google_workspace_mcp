@@ -854,7 +854,7 @@ def markdown_to_html(markdown_text: str) -> str:
 async def fix_image_sizes_in_doc(
     docs_service,
     document_id: str,
-    target_width: int = 350,
+    target_width: int = 450,
     max_threshold: int = 450
 ) -> int:
     """
